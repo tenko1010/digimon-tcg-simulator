@@ -44,6 +44,8 @@ public class LobbyWebSocket extends TextWebSocketHandler {
 
     private final Set<WebSocketSession> globalActiveSessions = ConcurrentHashMap.newKeySet();
     private final Map<WebSocketSession, PlayerStatus> playerStatuses = new ConcurrentHashMap<>();
+    private final Map<String, String> lastRoomsPayloadBySessionId = new ConcurrentHashMap<>();
+    private final Map<String, String> lastPresencePayloadBySessionId = new ConcurrentHashMap<>();
     private final Set<Room> rooms = ConcurrentHashMap.newKeySet();
     private final Set<PendingGameInvite> pendingGameInvites = ConcurrentHashMap.newKeySet();
     private final Map<PendingGameInvite, Long> gameInviteCooldowns = new ConcurrentHashMap<>();
@@ -66,7 +68,9 @@ public class LobbyWebSocket extends TextWebSocketHandler {
 
     private void sendTextMessage(WebSocketSession session, String message) throws IOException {
         if (session == null || !session.isOpen()) return;
-        session.sendMessage(new TextMessage(message));
+        synchronized (session) {
+            if (session.isOpen()) session.sendMessage(new TextMessage(message));
+        }
     }
 
     @Override
@@ -116,7 +120,9 @@ public class LobbyWebSocket extends TextWebSocketHandler {
                 .toList();
         List<RoomDTO> openRoomsDTO = openRooms.stream().map(this::getRoomDTO).toList();
 
-        sendTextMessage(session, "[ROOMS]:" + objectMapper.writeValueAsString(openRoomsDTO));
+        String roomsMessage = "[ROOMS]:" + objectMapper.writeValueAsString(openRoomsDTO);
+        sendTextMessage(session, roomsMessage);
+        lastRoomsPayloadBySessionId.put(session.getId(), roomsMessage);
         sendGlobalChatHistory(session);
         synchronized (quickPlayLock) {
             pruneQuickPlayQueue();
@@ -162,6 +168,8 @@ public class LobbyWebSocket extends TextWebSocketHandler {
         lastHeartbeatTimestamps.remove(session);
         globalActiveSessions.remove(session);
         playerStatuses.remove(session);
+        lastRoomsPayloadBySessionId.remove(session.getId());
+        lastPresencePayloadBySessionId.remove(session.getId());
 
         synchronized (quickPlayLock) {
             if (quickPlayQueue.remove(session)) broadcastQuickPlayCount();
@@ -710,8 +718,11 @@ public class LobbyWebSocket extends TextWebSocketHandler {
             
             String personalizedRoomsJson = objectMapper.writeValueAsString(filteredRoomDTOs);
             String personalizedMessage = "[ROOMS]:" + personalizedRoomsJson;
-            
-            sendTextMessage(session, personalizedMessage);
+
+            if (!personalizedMessage.equals(lastRoomsPayloadBySessionId.get(session.getId()))) {
+                sendTextMessage(session, personalizedMessage);
+                lastRoomsPayloadBySessionId.put(session.getId(), personalizedMessage);
+            }
         }
     }
 
@@ -742,11 +753,15 @@ public class LobbyWebSocket extends TextWebSocketHandler {
         String lobbyPlayersMessage = "[LOBBY_PLAYERS]:" + objectMapper.writeValueAsString(onlinePlayers);
         String userCountMessage = "[USER_COUNT]:" + getTotalSessionCount();
         String quickPlayCountMessage = "[USER_COUNT_QUICK_PLAY]:" + quickPlayQueue.size();
+        String presencePayload = userCountMessage + '\n' + quickPlayCountMessage + '\n' + lobbyPlayersMessage;
 
         for (WebSocketSession session : globalActiveSessions) {
-            sendTextMessage(session, userCountMessage);
-            sendTextMessage(session, quickPlayCountMessage);
-            sendTextMessage(session, lobbyPlayersMessage);
+            if (!presencePayload.equals(lastPresencePayloadBySessionId.get(session.getId()))) {
+                sendTextMessage(session, userCountMessage);
+                sendTextMessage(session, quickPlayCountMessage);
+                sendTextMessage(session, lobbyPlayersMessage);
+                lastPresencePayloadBySessionId.put(session.getId(), presencePayload);
+            }
         }
     }
 
@@ -765,7 +780,11 @@ public class LobbyWebSocket extends TextWebSocketHandler {
         globalActiveSessions.removeIf(existingSession -> {
             boolean belongsToUser = existingSession.getPrincipal() != null &&
                     Objects.equals(existingSession.getPrincipal().getName(), username);
-            if (belongsToUser) playerStatuses.remove(existingSession);
+            if (belongsToUser) {
+                playerStatuses.remove(existingSession);
+                lastRoomsPayloadBySessionId.remove(existingSession.getId());
+                lastPresencePayloadBySessionId.remove(existingSession.getId());
+            }
             return belongsToUser;
         });
         playerStatuses.put(session, status);
@@ -1088,13 +1107,19 @@ public class LobbyWebSocket extends TextWebSocketHandler {
         String messageContent = payload.substring("/chatMessage:".length());
         ChatMessage chatMessage = new ChatMessage(messageContent, username);
 
-        globalChatMessages.add(chatMessage);
+        synchronized (globalChatMessages) {
+            globalChatMessages.add(chatMessage);
+            if (globalChatMessages.size() > 500) globalChatMessages.removeFirst();
+        }
 
-        if (globalChatMessages.size() > 500) globalChatMessages.removeFirst();
-
-        for (WebSocketSession webSocketSession : globalActiveSessions) {
+        String chatPayload = "[CHAT_MESSAGE]:" + objectMapper.writeValueAsString(chatMessage);
+        for (WebSocketSession webSocketSession : List.copyOf(globalActiveSessions)) {
             if (canReceiveChatMessage(webSocketSession, chatMessage)) {
-                sendTextMessage(webSocketSession, "[CHAT_MESSAGE]:" + objectMapper.writeValueAsString(chatMessage));
+                try {
+                    sendTextMessage(webSocketSession, chatPayload);
+                } catch (IOException ignored) {
+                    // A slow or closed recipient must not prevent delivery to the remaining users.
+                }
             }
         }
     }
@@ -1113,9 +1138,14 @@ public class LobbyWebSocket extends TextWebSocketHandler {
 
         ChatMessage chatMessage = new ChatMessage(messageContent, userName);
 
-        for (LobbyPlayer player : room.getPlayers()) {
+        String chatPayload = "[CHAT_MESSAGE_ROOM]:" + objectMapper.writeValueAsString(chatMessage);
+        for (LobbyPlayer player : List.copyOf(room.getPlayers())) {
             if (canReceiveChatMessage(player.getSession(), chatMessage)) {
-                sendTextMessage(player.getSession(), "[CHAT_MESSAGE_ROOM]:" + objectMapper.writeValueAsString(chatMessage));
+                try {
+                    sendTextMessage(player.getSession(), chatPayload);
+                } catch (IOException ignored) {
+                    // A slow or closed recipient must not prevent delivery to the remaining users.
+                }
             }
         }
     }
@@ -1125,14 +1155,18 @@ public class LobbyWebSocket extends TextWebSocketHandler {
     }
 
     List<ChatMessage> getVisibleGlobalChatMessages(WebSocketSession session) {
+        List<ChatMessage> messageSnapshot;
+        synchronized (globalChatMessages) {
+            messageSnapshot = List.copyOf(globalChatMessages);
+        }
         Principal principal = session.getPrincipal();
-        if (principal == null) return List.copyOf(globalChatMessages);
+        if (principal == null) return messageSnapshot;
 
         Set<String> blockedAccounts = new HashSet<>(
                 mongoUserDetailsService.getBlockedAccounts(principal.getName())
         );
 
-        return globalChatMessages.stream()
+        return messageSnapshot.stream()
                 .filter(message -> "【SERVER】".equals(message.author()) || !blockedAccounts.contains(message.author()))
                 .toList();
     }
@@ -1151,9 +1185,10 @@ public class LobbyWebSocket extends TextWebSocketHandler {
     public void broadcastServerMessage(String message) throws IOException {
         ChatMessage serverMessage = new ChatMessage(message, "【SERVER】");
 
-        globalChatMessages.add(serverMessage);
-        
-        if (globalChatMessages.size() > 500) globalChatMessages.removeFirst();
+        synchronized (globalChatMessages) {
+            globalChatMessages.add(serverMessage);
+            if (globalChatMessages.size() > 500) globalChatMessages.removeFirst();
+        }
         
         for (WebSocketSession session : globalActiveSessions) {
             sendTextMessage(session, "[CHAT_MESSAGE]:" + objectMapper.writeValueAsString(serverMessage));
@@ -1167,7 +1202,10 @@ public class LobbyWebSocket extends TextWebSocketHandler {
     }
     
     public boolean removeMessageById(String messageId) throws IOException {
-        boolean removed = globalChatMessages.removeIf(msg -> msg.id().equals(messageId));
+        boolean removed;
+        synchronized (globalChatMessages) {
+            removed = globalChatMessages.removeIf(msg -> msg.id().equals(messageId));
+        }
         
         if (removed) {
             // Broadcast message deletion to all connected clients

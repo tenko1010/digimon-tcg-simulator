@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.socket.WebSocketSession;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 @RequiredArgsConstructor
@@ -21,6 +22,8 @@ public class MongoUserDetailsService implements UserDetailsService {
 
     private final MongoUserRepository mongoUserRepository;
     private final StarterDeckService starterDeckService;
+    private static final long BLOCKED_ACCOUNTS_CACHE_TTL_MS = 30_000;
+    private final Map<String, BlockedAccountsCacheEntry> blockedAccountsCache = new ConcurrentHashMap<>();
 
     private static final String[] badWords = {"abuse", "analsex", "ballsack", "bastard", "bestiality", "biatch", "bitch", "blowjob", "fuck", "fuuck", "rape", "whore", "nigger", "nazi", "jews"};
 
@@ -198,6 +201,7 @@ public class MongoUserDetailsService implements UserDetailsService {
 
     public void setBlockedAccounts(List<String> blockedAccounts) {
         MongoUser mongoUser = getCurrentUser();
+        List<String> blockedAccountsSnapshot = List.copyOf(blockedAccounts);
         MongoUser updatedUser = new MongoUser(
                 mongoUser.id(),
                 mongoUser.username(),
@@ -206,17 +210,27 @@ public class MongoUserDetailsService implements UserDetailsService {
                 mongoUser.answer(),
                 mongoUser.activeDeckId(),
                 mongoUser.avatarName(),
-                blockedAccounts,
+                blockedAccountsSnapshot,
                 mongoUser.role()
         );
         mongoUserRepository.save(updatedUser);
+        blockedAccountsCache.put(
+                mongoUser.username(),
+                new BlockedAccountsCacheEntry(blockedAccountsSnapshot, System.currentTimeMillis() + BLOCKED_ACCOUNTS_CACHE_TTL_MS)
+        );
     }
 
     public List<String> getBlockedAccounts(String username) {
-        MongoUser user = getUserByUsername(username);
-        List<String> blockedAccounts = user.blockedAccounts();
-        return blockedAccounts != null ? blockedAccounts : Collections.emptyList();
+        long now = System.currentTimeMillis();
+        return blockedAccountsCache.compute(username, (key, cached) -> {
+            if (cached != null && cached.expiresAt() > now) return cached;
+            List<String> blockedAccounts = getUserByUsername(key).blockedAccounts();
+            List<String> snapshot = blockedAccounts == null ? List.of() : List.copyOf(blockedAccounts);
+            return new BlockedAccountsCacheEntry(snapshot, now + BLOCKED_ACCOUNTS_CACHE_TTL_MS);
+        }).blockedAccounts();
     }
+
+    private record BlockedAccountsCacheEntry(List<String> blockedAccounts, long expiresAt) {}
 
     public boolean checkBlockedByWebSocketSessions(WebSocketSession player1, WebSocketSession player2) {
         String player1Username = (player1 != null && player1.getPrincipal() != null)
