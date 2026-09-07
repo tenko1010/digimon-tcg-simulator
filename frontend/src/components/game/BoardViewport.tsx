@@ -49,6 +49,10 @@ export const CardImg = styled.img`
 
 export const BoardLayout = styled.div`
     position: relative;
+    align-self: flex-end;
+    /* The enlarged hand extends below the last grid row. Reserve only its
+       overhang instead of leaving half the unused viewport below the board. */
+    margin-bottom: calc(var(--board-width) * 0.018);
     flex: 0 0 var(--board-width);
     width: var(--board-width);
     aspect-ratio: 35 / 20;
