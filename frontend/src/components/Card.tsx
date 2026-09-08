@@ -1,5 +1,6 @@
 import { BootStage, CardTypeGame } from "../utils/types.ts";
 import styled from "@emotion/styled";
+import DangerousIcon from "@mui/icons-material/Dangerous";
 import { useGeneralStates } from "../hooks/useGeneralStates.ts";
 import { tamerLocations, useGameBoardStates } from "../hooks/useGameBoardStates.ts";
 import { getNumericModifier, numbersWithModifiers } from "../utils/functions.ts";
@@ -508,7 +509,7 @@ export default function Card(props: CardProps) {
                                     )}
                                     <KeywordWrapper>
                                         {modifiers?.keywords
-                                            .filter((w) => w !== "SICK" && w !== "TAUNT")
+                                            .filter((w) => w !== "SICK" && w !== "TAUNT" && w !== "CANNOT_DIGIVOLVE")
                                             .map((keyword) => (
                                                 <ModifierSpan keyword={keyword} key={`${keyword}_${card.id}`}>
                                                     <span>{keyword}</span>
@@ -565,6 +566,12 @@ export default function Card(props: CardProps) {
                         <TauntPulseOverlay data-testid="taunt-pulse-overlay" />
                     </CardAnimationContainer>
                 )}
+                {modifiers?.keywords.includes("CANNOT_DIGIVOLVE") &&
+                    card.cardType === "Digimon" && renderModifiersOnTop && !isCardFaceDown && (
+                        <CannotDigivolveOverlay data-testid="cannot-digivolve-overlay">
+                            <DangerousIcon titleAccess="Cannot Digivolve" />
+                        </CannotDigivolveOverlay>
+                    )}
 
                 <StyledImage
                     style={{
@@ -702,6 +709,44 @@ const StyledImage = styled.img<StyledImageProps>`
         70% {
             filter: drop-shadow(0 0 4px #e51042) brightness(0.5) saturate(1.1);
         }
+    }
+`;
+
+const CannotDigivolveOverlay = styled.div`
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    z-index: 10000;
+    pointer-events: none;
+
+    svg {
+        width: 45%;
+        height: auto;
+        color: #ffb74d;
+        filter: drop-shadow(0 0 2px black) drop-shadow(0 0 3px black);
+        z-index: 1;
+    }
+
+    &::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: rgba(255, 152, 0, 0.3);
+        box-shadow: inset 0 0 8px 2px #ff9800;
+        animation: cannot-digivolve-flash 2.4s ease-in-out infinite;
+    }
+
+    @keyframes cannot-digivolve-flash {
+        0%, 30%, 100% { opacity: 0; }
+        15% { opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        &::before { animation: none; opacity: 0; }
     }
 `;
 

@@ -5,6 +5,7 @@ import styled from "@emotion/styled";
 import Lottie from "lottie-react";
 import { useEffect, useState } from "react";
 import { AddCircleOutlined, RemoveCircleOutlined } from "@mui/icons-material";
+import DangerousIcon from "@mui/icons-material/Dangerous";
 import { useGameBoardStates } from "../../../hooks/useGameBoardStates.ts";
 import { CardModifiers, CardTypeGame } from "../../../utils/types.ts";
 import { getNumericModifier, numbersWithModifiers } from "../../../utils/functions.ts";
@@ -51,15 +52,12 @@ export default function ModifierMenu({ sendSetModifiers }: ModifierMenuProps) {
     const cardToSend = useGameBoardStates((state) => state.cardToSend);
     const setModifiers = useGameBoardStates((state) => state.setModifiers);
 
-    const card = useGameBoardStates((state) =>
-        (state[cardToSend?.location as keyof typeof state] as CardTypeGame[]).find(
-            (card) => card.id === cardToSend?.card.id
-        )
-    );
-
-    useEffect(() => {
-        console.log(cardToSend);
-    }, [cardToSend]);
+    const card = useGameBoardStates((state) => {
+        const cards = state[cardToSend?.location as keyof typeof state];
+        return Array.isArray(cards)
+            ? (cards as CardTypeGame[]).find((card) => card.id === cardToSend?.card.id)
+            : undefined;
+    });
 
     const [plusDp, setPlusDp] = useState<number>(0);
     const [plusSecurityAttacks, setPlusSecurityAttacks] = useState<number>(0);
@@ -102,6 +100,14 @@ export default function ModifierMenu({ sendSetModifiers }: ModifierMenuProps) {
     function handleSetTaunt() {
         if (keywords.includes("TAUNT")) setKeywords((prev) => prev.filter((kw) => kw !== "TAUNT"));
         else setKeywords([...keywords, "TAUNT"]);
+    }
+
+    function handleSetCannotDigivolve() {
+        setKeywords((prev) =>
+            prev.includes("CANNOT_DIGIVOLVE")
+                ? prev.filter((keyword) => keyword !== "CANNOT_DIGIVOLVE")
+                : [...prev, "CANNOT_DIGIVOLVE"]
+        );
     }
 
     // eslint-disable-next-line
@@ -161,7 +167,7 @@ export default function ModifierMenu({ sendSetModifiers }: ModifierMenuProps) {
 
                         <Stack direction={"row"} gap={0.5} maxWidth={"100%"} flexWrap={"wrap"}>
                             {keywords
-                                .filter((w) => w !== "SICK" && w !== "TAUNT")
+                                .filter((w) => w !== "SICK" && w !== "TAUNT" && w !== "CANNOT_DIGIVOLVE")
                                 .map((keyword) => (
                                     <ModifierSpan
                                         onClick={() => setKeywords((prev) => prev.filter((kw) => kw !== keyword))}
@@ -199,6 +205,24 @@ export default function ModifierMenu({ sendSetModifiers }: ModifierMenuProps) {
                             />
                             <label htmlFor="toggleTaunt" className="button">
                                 (Un)Mark as taunted💢
+                            </label>
+                        </div>
+
+                        <div style={{ width: "100%", display: "flex", alignItems: "center" }}>
+                            <input
+                                type="checkbox"
+                                id="toggleCannotDigivolve"
+                                className="button"
+                                checked={keywords.includes("CANNOT_DIGIVOLVE")}
+                                onChange={handleSetCannotDigivolve}
+                            />
+                            <label
+                                htmlFor="toggleCannotDigivolve"
+                                className="button"
+                                style={{ display: "flex", alignItems: "center", gap: 4 }}
+                            >
+                                (Un)Mark as Cannot Digivolve
+                                <DangerousIcon fontSize="small" />
                             </label>
                         </div>
 

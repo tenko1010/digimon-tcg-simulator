@@ -1,10 +1,12 @@
-import { describe, expect, it, beforeEach } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { act, render, screen, cleanup } from "@testing-library/react";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
 import Card from "./Card";
 import { useGameBoardStates } from "../hooks/useGameBoardStates.ts";
 import { CardTypeGame } from "../utils/types.ts";
+
+afterEach(cleanup);
 
 const LOCATION = "myDigi1";
 
@@ -29,9 +31,14 @@ function makeCard(keywords: string[]): CardTypeGame {
 
 function renderCard(card: CardTypeGame) {
     useGameBoardStates.setState({ [LOCATION]: [card] } as never);
+    // Card receives updated props from its subscribed board parent in the app.
+    function BoardCard() {
+        const currentCard = useGameBoardStates((state) => state[LOCATION][0]);
+        return <Card card={currentCard} location={LOCATION} index={0} />;
+    }
     return render(
         <DndProvider backend={HTML5Backend}>
-            <Card card={card} location={LOCATION} index={0} />
+            <BoardCard />
         </DndProvider>
     );
 }
@@ -45,6 +52,37 @@ describe("Card keyword animations", () => {
         renderCard(makeCard([]));
         expect(screen.queryByAltText("suspended")).not.toBeInTheDocument();
         expect(screen.queryByTestId("taunt-pulse-overlay")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("cannot-digivolve-overlay")).not.toBeInTheDocument();
+    });
+
+    it("renders Cannot Digivolve with other markers and removes it after a modifier update", () => {
+        const card = makeCard(["CANNOT_DIGIVOLVE", "TAUNT"]);
+        renderCard(card);
+        expect(screen.getByTitle("Cannot Digivolve")).toBeInTheDocument();
+        expect(screen.getByTestId("cannot-digivolve-overlay")).toBeInTheDocument();
+        expect(screen.getByTestId("taunt-pulse-overlay")).toBeInTheDocument();
+        expect(screen.queryByText("CANNOT_DIGIVOLVE")).not.toBeInTheDocument();
+        act(() => {
+            useGameBoardStates.getState().setModifiers(card.id, LOCATION, {
+                ...card.modifiers, keywords: ["TAUNT"],
+            });
+        });
+        expect(screen.queryByTestId("cannot-digivolve-overlay")).not.toBeInTheDocument();
+        expect(screen.getByTestId("taunt-pulse-overlay")).toBeInTheDocument();
+    });
+
+    it("does not reveal the marker on a face-down card", () => {
+        const card = makeCard(["CANNOT_DIGIVOLVE"]);
+        card.isFaceUp = false;
+        renderCard(card);
+        expect(screen.queryByTestId("cannot-digivolve-overlay")).not.toBeInTheDocument();
+    });
+
+    it("does not render the marker on a digivolution source", () => {
+        const card = makeCard(["CANNOT_DIGIVOLVE"]);
+        useGameBoardStates.setState({ [LOCATION]: [card, { ...makeCard([]), id: "top-card" }] });
+        render(<DndProvider backend={HTML5Backend}><Card card={card} location={LOCATION} index={0} /></DndProvider>);
+        expect(screen.queryByTestId("cannot-digivolve-overlay")).not.toBeInTheDocument();
     });
 
     it("renders the SICK animation when SICK is toggled on", () => {

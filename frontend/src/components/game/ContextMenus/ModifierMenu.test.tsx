@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import ModifierMenu from "./ModifierMenu";
@@ -22,6 +22,8 @@ vi.mock("react-contexify", () => ({
         <div onClick={disabled ? undefined : onClick}>{children}</div>
     ),
 }));
+
+afterEach(cleanup);
 
 const LOCATION = "myDigi1";
 
@@ -57,6 +59,36 @@ function renderMenu(card: CardTypeGame) {
 describe("ModifierMenu SICK / TAUNT toggles", () => {
     beforeEach(() => {
         useGameBoardStates.setState({ [LOCATION]: [], cardToSend: null } as never);
+    });
+
+    it("saves Cannot Digivolve locally and sends it while preserving other modifiers", async () => {
+        const user = userEvent.setup();
+        const card = makeCard(["SICK", "TAUNT", "Blocker"]);
+        card.modifiers.plusDp = 2000;
+        const { sendSetModifiers } = renderMenu(card);
+        const checkbox = screen.getByRole("checkbox", { name: "(Un)Mark as Cannot Digivolve" });
+        expect(checkbox).not.toBeChecked();
+        await user.click(checkbox);
+        await user.click(screen.getByText("SAVE VALUES"));
+
+        const expected = { ...card.modifiers, keywords: ["SICK", "TAUNT", "Blocker", "CANNOT_DIGIVOLVE"] };
+        expect(sendSetModifiers).toHaveBeenCalledWith(card.id, LOCATION, expected);
+        expect(useGameBoardStates.getState()[LOCATION][0].modifiers).toEqual(expected);
+    });
+
+    it("loads an existing Cannot Digivolve marker and removes only that marker", async () => {
+        const user = userEvent.setup();
+        const card = makeCard(["TAUNT", "CANNOT_DIGIVOLVE"]);
+        const { sendSetModifiers } = renderMenu(card);
+        const checkbox = screen.getByRole("checkbox", { name: "(Un)Mark as Cannot Digivolve" });
+        expect(checkbox).toBeChecked();
+        expect(screen.queryByText("CANNOT_DIGIVOLVE")).not.toBeInTheDocument();
+        await user.click(checkbox);
+        await user.click(screen.getByText("SAVE VALUES"));
+        expect(sendSetModifiers).toHaveBeenCalledWith(card.id, LOCATION, {
+            ...card.modifiers, keywords: ["TAUNT"],
+        });
+        expect(useGameBoardStates.getState()[LOCATION][0].modifiers.keywords).toEqual(["TAUNT"]);
     });
 
     it("toggles the SICK checkbox on and includes SICK in the saved keywords", async () => {
