@@ -44,6 +44,7 @@ public class LobbyWebSocket extends TextWebSocketHandler {
 
     private final Set<WebSocketSession> globalActiveSessions = ConcurrentHashMap.newKeySet();
     private final Map<WebSocketSession, PlayerStatus> playerStatuses = new ConcurrentHashMap<>();
+    private final Map<String, String> lastPresencePayloadBySessionId = new ConcurrentHashMap<>();
     private final Set<Room> rooms = ConcurrentHashMap.newKeySet();
     private final Set<PendingGameInvite> pendingGameInvites = ConcurrentHashMap.newKeySet();
     private final Map<PendingGameInvite, Long> gameInviteCooldowns = new ConcurrentHashMap<>();
@@ -141,6 +142,8 @@ public class LobbyWebSocket extends TextWebSocketHandler {
                     lastHeartbeatTimestamps.remove(session);
                     quickPlayQueue.remove(session);
                     globalActiveSessions.remove(session);
+                    playerStatuses.remove(session);
+                    lastPresencePayloadBySessionId.remove(session.getId());
                     return;
                 }
 
@@ -162,6 +165,7 @@ public class LobbyWebSocket extends TextWebSocketHandler {
         lastHeartbeatTimestamps.remove(session);
         globalActiveSessions.remove(session);
         playerStatuses.remove(session);
+        lastPresencePayloadBySessionId.remove(session.getId());
 
         synchronized (quickPlayLock) {
             if (quickPlayQueue.remove(session)) broadcastQuickPlayCount();
@@ -459,19 +463,22 @@ public class LobbyWebSocket extends TextWebSocketHandler {
 
     @Scheduled(fixedRate = 30000) // 30 seconds
     private void longIntervalOperations() throws IOException {
-        checkConnectionAndCleanup();
+        closeTimedOutSessions(System.currentTimeMillis());
         reconcileQuickPlayQueue();
     }
 
-    private void checkConnectionAndCleanup() throws IOException {
-        long now = System.currentTimeMillis();
-
-        for (Map.Entry<WebSocketSession, Long> entry : lastHeartbeatTimestamps.entrySet()) {
+    void closeTimedOutSessions(long now) {
+        for (Map.Entry<WebSocketSession, Long> entry : List.copyOf(lastHeartbeatTimestamps.entrySet())) {
             WebSocketSession session = entry.getKey();
             long lastHeartbeat = entry.getValue();
 
             if (now - lastHeartbeat > 30000) { // 30 seconds timeout
-                afterConnectionClosed(session, CloseStatus.SESSION_NOT_RELIABLE);
+                if (!lastHeartbeatTimestamps.remove(session, lastHeartbeat)) continue;
+                try {
+                    if (session.isOpen()) session.close(CloseStatus.SESSION_NOT_RELIABLE);
+                } catch (IOException e) {
+                    System.err.println("Failed to close timed-out lobby session " + session.getId() + ": " + e.getMessage());
+                }
             }
         }
     }
@@ -716,37 +723,24 @@ public class LobbyWebSocket extends TextWebSocketHandler {
     }
 
     private void broadcastUserCount() throws IOException {
-        Map<String, PlayerStatus> onlinePlayerStatuses = new HashMap<>();
-
-        globalActiveSessions.stream()
-                .filter(session -> session.getPrincipal() != null)
-                .forEach(session -> onlinePlayerStatuses.put(
-                        Objects.requireNonNull(session.getPrincipal()).getName(),
-                        playerStatuses.getOrDefault(session, PlayerStatus.LOBBY)
-                ));
-
-        rooms.stream()
-                .filter(room -> room.getPlayers().size() >= 2)
-                .flatMap(room -> room.getPlayers().stream())
-                .forEach(player -> onlinePlayerStatuses.put(player.getName(), PlayerStatus.GAME_ROOM));
-
-        gameWebSocket.gameRooms.values().forEach(gameRoom -> {
-            onlinePlayerStatuses.put(gameRoom.getPlayer1().username(), PlayerStatus.MATCH);
-            onlinePlayerStatuses.put(gameRoom.getPlayer2().username(), PlayerStatus.MATCH);
-        });
+        Map<String, PlayerStatus> onlinePlayerStatuses = getOnlinePlayerStatusSnapshot();
 
         List<OnlinePlayerDTO> onlinePlayers = onlinePlayerStatuses.entrySet().stream()
                 .map(entry -> new OnlinePlayerDTO(entry.getKey(), entry.getValue().displayText))
                 .sorted(Comparator.comparing(OnlinePlayerDTO::name, String.CASE_INSENSITIVE_ORDER))
                 .toList();
         String lobbyPlayersMessage = "[LOBBY_PLAYERS]:" + objectMapper.writeValueAsString(onlinePlayers);
-        String userCountMessage = "[USER_COUNT]:" + getTotalSessionCount();
+        String userCountMessage = "[USER_COUNT]:" + onlinePlayerStatuses.size();
         String quickPlayCountMessage = "[USER_COUNT_QUICK_PLAY]:" + quickPlayQueue.size();
+        String presencePayload = userCountMessage + '\n' + quickPlayCountMessage + '\n' + lobbyPlayersMessage;
 
-        for (WebSocketSession session : globalActiveSessions) {
-            sendTextMessage(session, userCountMessage);
-            sendTextMessage(session, quickPlayCountMessage);
-            sendTextMessage(session, lobbyPlayersMessage);
+        for (WebSocketSession session : globalActiveSessions.stream().filter(WebSocketSession::isOpen).toList()) {
+            if (!presencePayload.equals(lastPresencePayloadBySessionId.get(session.getId()))) {
+                sendTextMessage(session, userCountMessage);
+                sendTextMessage(session, quickPlayCountMessage);
+                sendTextMessage(session, lobbyPlayersMessage);
+                lastPresencePayloadBySessionId.put(session.getId(), presencePayload);
+            }
         }
     }
 
@@ -765,7 +759,10 @@ public class LobbyWebSocket extends TextWebSocketHandler {
         globalActiveSessions.removeIf(existingSession -> {
             boolean belongsToUser = existingSession.getPrincipal() != null &&
                     Objects.equals(existingSession.getPrincipal().getName(), username);
-            if (belongsToUser) playerStatuses.remove(existingSession);
+            if (belongsToUser) {
+                playerStatuses.remove(existingSession);
+                lastPresencePayloadBySessionId.remove(existingSession.getId());
+            }
             return belongsToUser;
         });
         playerStatuses.put(session, status);
@@ -826,23 +823,35 @@ public class LobbyWebSocket extends TextWebSocketHandler {
     }
 
     private int getTotalSessionCount() {
-        Set<String> activePlayerNames = new HashSet<>();
+        return getOnlinePlayerStatusSnapshot().size();
+    }
 
+    private Map<String, PlayerStatus> getOnlinePlayerStatusSnapshot() {
+        Map<String, PlayerStatus> onlinePlayerStatuses = new HashMap<>();
         globalActiveSessions.stream()
-                .map(WebSocketSession::getPrincipal)
-                .filter(Objects::nonNull)
-                .map(Principal::getName)
-                .forEach(activePlayerNames::add);
+                .filter(WebSocketSession::isOpen)
+                .filter(session -> session.getPrincipal() != null)
+                .forEach(session -> onlinePlayerStatuses.put(
+                        Objects.requireNonNull(session.getPrincipal()).getName(),
+                        playerStatuses.getOrDefault(session, PlayerStatus.LOBBY)
+                ));
+
+        rooms.stream()
+                .filter(room -> room.getPlayers().size() >= 2)
+                .flatMap(room -> room.getPlayers().stream())
+                .filter(player -> player.getSession() != null && player.getSession().isOpen())
+                .forEach(player -> onlinePlayerStatuses.put(player.getName(), PlayerStatus.GAME_ROOM));
 
         gameWebSocket.gameRooms.values().stream()
                 .flatMap(gameRoom -> gameRoom.getSessions().stream())
                 .filter(WebSocketSession::isOpen)
-                .map(WebSocketSession::getPrincipal)
-                .filter(Objects::nonNull)
-                .map(Principal::getName)
-                .forEach(activePlayerNames::add);
+                .filter(session -> session.getPrincipal() != null)
+                .forEach(session -> onlinePlayerStatuses.put(
+                        Objects.requireNonNull(session.getPrincipal()).getName(),
+                        PlayerStatus.MATCH
+                ));
 
-        return activePlayerNames.size();
+        return onlinePlayerStatuses;
     }
 
     private RoomDTO getRoomDTO(Room room) {
